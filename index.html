@@ -396,10 +396,10 @@ function App(){
       const plan=parseJ(e.trading_plan||e.tradingPlan);
       const als=[];
       for(const row of plan){
-        if(row.entry) als.push({type:"entry",price:row.entry,label:row.scenario,triggered:false,color:"#F59E0B"});
-        if(row.stopLoss) als.push({type:"stop",price:row.stopLoss,label:row.scenario,triggered:false,color:"#EF4444"});
-        if(row.target1) als.push({type:"target",price:row.target1,label:`${row.scenario} — T1`,triggered:false,color:"#10B981"});
-        if(row.target2) als.push({type:"target",price:row.target2,label:`${row.scenario} — T2`,triggered:false,color:"#10B981"});
+        if(row.entry) als.push({type:"entry",price:row.entry,label:`Entry — ${row.scenario}`,triggered:false,color:"#F59E0B"});
+        if(row.stopLoss) als.push({type:"stop",price:row.stopLoss,label:`Stop Loss`,triggered:false,color:"#EF4444"});
+        if(row.target1) als.push({type:"target",price:row.target1,label:`Target 1`,triggered:false,color:"#10B981"});
+        if(row.target2) als.push({type:"target",price:row.target2,label:`Target 2`,triggered:false,color:"#10B981"});
       }
       if(als.length>0) built[sym]=als;
     }
@@ -1064,7 +1064,40 @@ function App(){
 
                 <div className="no-print" style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
                   <div style={{fontSize:14,fontWeight:700,color:C.text}}>🖨️ All Scripts — Action Plan</div>
-                  <button onClick={()=>window.print()} style={{padding:"9px 22px",borderRadius:8,background:C.accent,border:"none",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>🖨️ Print / Save as PDF</button>
+                  <button onClick={()=>{
+                    const content=document.getElementById("printarea").innerHTML;
+                    const w=window.open("","_blank","width=900,height=700");
+                    w.document.write(`<!DOCTYPE html><html><head><title>PSX Trading Strategy</title><style>
+                      body{font-family:Arial,sans-serif;padding:20px;background:white;color:black;}
+                      .script-block{border:1px solid #999;border-radius:4px;padding:10px;margin-bottom:10px;page-break-inside:avoid;}
+                      .script-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #ccc;padding-bottom:6px;margin-bottom:6px;}
+                      .sym{font-size:15px;font-weight:800;}
+                      .price{font-size:14px;font-weight:700;color:#2563EB;}
+                      .badge{border:1px solid #999;padding:1px 6px;border-radius:10px;font-size:9px;font-weight:700;margin-left:4px;}
+                      .verdict{font-size:10px;font-style:italic;border-left:3px solid #999;padding:3px 6px;margin-bottom:6px;background:#f9f9f9;}
+                      .action{font-size:11px;font-weight:700;border-left:3px solid #000;padding:4px 8px;margin-bottom:6px;background:#f0f0f0;}
+                      table{width:100%;border-collapse:collapse;font-size:9px;margin-bottom:6px;}
+                      th{background:#eee;border:1px solid #ccc;padding:3px 5px;text-align:left;font-size:8px;text-transform:uppercase;}
+                      td{border:1px solid #ddd;padding:3px 5px;}
+                      .keyrow{display:grid;grid-template-columns:repeat(5,1fr);gap:4px;margin-top:5px;}
+                      .keycell{border:1px solid #ddd;border-radius:3px;padding:3px 5px;}
+                      .keylabel{font-size:7px;color:#888;text-transform:uppercase;}
+                      .keyval{font-size:10px;font-weight:700;}
+                      .notes{font-size:9px;font-style:italic;border-left:2px solid #666;padding-left:5px;margin-top:4px;color:#444;}
+                      .pheader{border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:14px;}
+                      .ptitle{font-size:16px;font-weight:800;}
+                      .pdate{font-size:10px;color:#666;}
+                      @media print{body{padding:10px;} .script-block{page-break-inside:avoid;}}
+                    </style></head><body>
+                    <div class="pheader">
+                      <div class="ptitle">PSX Trading Strategy — All Scripts</div>
+                      <div class="pdate">Date: ${new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"long",year:"numeric"})}</div>
+                    </div>
+                    ${content}
+                    </body></html>`);
+                    w.document.close();
+                    setTimeout(()=>w.print(),500);
+                  }} style={{padding:"9px 24px",borderRadius:8,background:C.accent,border:"none",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>🖨️ Print / Save as PDF</button>
                 </div>
 
                 <div id="printarea">
