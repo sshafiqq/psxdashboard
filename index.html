@@ -1,0 +1,1234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>PSX Analysis Dashboard</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#080C12;color:#E2E8F0;overflow:hidden;}
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-track{background:#0F1520;}
+::-webkit-scrollbar-thumb{background:#1E2A3C;border-radius:4px;}
+select option{background:#141B27;color:#E2E8F0;}
+textarea{resize:vertical;font-family:'Segoe UI',system-ui,sans-serif;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useRef,useEffect}=React;
+
+// ── Supabase ──────────────────────────────────────────────────────
+const SB_URL="https://bxglpbtbbqbaplpeakbj.supabase.co";
+const SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ4Z2xwYnRiYnFiYXBscGVha2JqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAxMzQyNjksImV4cCI6MjA5NTcxMDI2OX0.HKTOB_tNP03qq7sfjVUZId4YWLhrFUWUo4_sHVfQ4lc";
+
+// ── Yahoo Finance Price API ───────────────────────────────────────
+const YF_KEY="f13ed114c7mshabe6cc375c3407ep1af89fjsnc7d8c2e0dac8";
+
+async function fetchLivePrice(symbol){
+  try{
+    const res=await fetch(`https://dps.psx.com.pk/quotes?symbol=${symbol}`,{
+      headers:{"Accept":"application/json","X-Requested-With":"XMLHttpRequest"}
+    });
+    const data=await res.json();
+    const q=Array.isArray(data)?data[0]:data;
+    if(!q) return null;
+    return{
+      price:q.currentPrice||q.ldcp||q.close||null,
+      change:q.change||null,
+      changePct:q.changeP||q.changePct||null,
+      high:q.high||null,
+      low:q.low||null,
+      volume:q.volume||null,
+    };
+  }catch(e){console.warn("PSX price fetch failed:",e);return null;}
+}
+
+async function fetchAllPrices(symbols){
+  try{
+    // Fetch all at once
+    const res=await fetch(`https://dps.psx.com.pk/quotes`,{
+      headers:{"Accept":"application/json","X-Requested-With":"XMLHttpRequest"}
+    });
+    const data=await res.json();
+    const results={};
+    const arr=Array.isArray(data)?data:Object.values(data);
+    for(const q of arr){
+      const sym=(q.symbol||q.ticker||"").toUpperCase();
+      if(symbols.includes(sym)){
+        results[sym]={
+          price:q.currentPrice||q.ldcp||q.close||null,
+          change:q.change||null,
+          changePct:q.changeP||q.changePct||null,
+          high:q.high||null,
+          low:q.low||null,
+          volume:q.volume||null,
+        };
+      }
+    }
+    // Fallback — fetch individually for any missing
+    for(const s of symbols){
+      if(!results[s]){
+        const p=await fetchLivePrice(s);
+        if(p) results[s]=p;
+      }
+    }
+    return results;
+  }catch(e){
+    // Fallback to individual fetches
+    const results={};
+    await Promise.all(symbols.map(async s=>{
+      const p=await fetchLivePrice(s);
+      if(p) results[s]=p;
+    }));
+    return results;
+  }
+}
+
+
+async function sbReq(path,opts={}){
+  const res=await fetch(`${SB_URL}/rest/v1/${path}`,{
+    ...opts,
+    headers:{"apikey":SB_KEY,"Authorization":`Bearer ${SB_KEY}`,"Content-Type":"application/json","Prefer":opts.prefer||"",...(opts.headers||{})}
+  });
+  if(!res.ok){const e=await res.text();throw new Error(e);}
+  const t=await res.text();return t?JSON.parse(t):null;
+}
+async function loadAll(){
+  const rows=await sbReq(`scripts?order=uploaded_at.desc&select=*`)||[];
+  const g={};for(const r of rows){const s=r.symbol||"?";if(!g[s])g[s]=[];g[s].push(r);}return g;
+}
+async function loadAllHM(){
+  const rows=await sbReq(`hm_scripts?order=uploaded_at.desc&select=*`)||[];
+  const g={};for(const r of rows){if(!g[r.symbol])g[r.symbol]=r;}return g;
+}
+async function loadAllConclusions(){
+  const rows=await sbReq(`conclusions?order=updated_at.desc&select=*`)||[];
+  const g={};for(const r of rows){g[r.symbol]=r;}return g;
+}
+async function saveRow(table,entry){
+  return await sbReq(table,{method:"POST",prefer:"return=representation",body:JSON.stringify(entry)});
+}
+async function updateRow(table,id,data){
+  return await sbReq(`${table}?id=eq.${id}`,{method:"PATCH",prefer:"return=representation",body:JSON.stringify(data)});
+}
+async function delRow(table,id){await sbReq(`${table}?id=eq.${id}`,{method:"DELETE"});}
+async function upsertBySymbol(table,entry){
+  await sbReq(`${table}?symbol=eq.${entry.symbol}`,{method:"DELETE"});
+  return await sbReq(table,{method:"POST",prefer:"return=representation",body:JSON.stringify(entry)});
+}
+
+// ── Colors ────────────────────────────────────────────────────────
+const C={
+  bg:"#080C12",surface:"#0F1520",surface2:"#141B27",
+  border:"#1E2A3C",border2:"#243044",
+  accent:"#2563EB",accentDim:"rgba(37,99,235,0.12)",
+  gold:"#F0B429",
+  green:"#10B981",greenDim:"rgba(16,185,129,0.10)",
+  red:"#EF4444",redDim:"rgba(239,68,68,0.10)",
+  amber:"#F59E0B",amberDim:"rgba(245,158,11,0.10)",
+  blue:"#3B82F6",blueDim:"rgba(59,130,246,0.10)",
+  pink:"#EC4899",pinkDim:"rgba(236,72,153,0.12)",
+  cyan:"#06B6D4",cyanDim:"rgba(6,182,212,0.12)",
+  purple:"#8B5CF6",purpleDim:"rgba(139,92,246,0.12)",
+  text:"#E2E8F0",textSub:"#94A3B8",textDim:"#475569",
+};
+const vStyle=v=>{
+  const l=(v||"").toLowerCase();
+  if(l.includes("avoid")||l.includes("danger")||l.includes("sell")) return{color:C.red,bg:C.redDim,dot:C.red,label:"Avoid"};
+  if(l.includes("wait")||l.includes("slowly")||l.includes("neutral")) return{color:C.amber,bg:C.amberDim,dot:C.amber,label:"Wait"};
+  if(l.includes("buy")||l.includes("accum")) return{color:C.green,bg:C.greenDim,dot:C.green,label:"Accumulate"};
+  if(l.includes("hold")) return{color:C.blue,bg:C.blueDim,dot:C.blue,label:"Hold"};
+  return{color:C.blue,bg:C.blueDim,dot:C.blue,label:"Monitor"};
+};
+const hmSigStyle=s=>{
+  const l=(s||"").toLowerCase();
+  if(l.includes("buy")) return{color:C.green,bg:C.greenDim};
+  if(l.includes("sell")||l.includes("avoid")) return{color:C.red,bg:C.redDim};
+  if(l.includes("wait")||l.includes("watch")) return{color:C.amber,bg:C.amberDim};
+  if(l.includes("hold")) return{color:C.blue,bg:C.blueDim};
+  return{color:C.textSub,bg:"rgba(255,255,255,0.06)"};
+};
+const zoneColor=z=>{
+  const l=(z||"").toLowerCase();
+  if(l.includes("pink")||l.includes("bull")) return{color:C.pink,bg:C.pinkDim,label:"🟢 Pink"};
+  if(l.includes("cyan")||l.includes("bear")) return{color:C.cyan,bg:C.cyanDim,label:"🔵 Cyan"};
+  return{color:C.textDim,bg:"transparent",label:z||"—"};
+};
+const rsiCol=r=>{const n=parseFloat(r);return n>=70?C.red:n<=30?C.green:C.gold;};
+
+// ── UI Components ─────────────────────────────────────────────────
+function Pill({text,color,bg}){
+  return <span style={{fontSize:10,fontWeight:700,letterSpacing:0.5,padding:"3px 9px",borderRadius:20,background:bg||"rgba(255,255,255,0.06)",color:color||C.textSub,textTransform:"uppercase",whiteSpace:"nowrap"}}>{text}</span>;
+}
+function Card({label,value,color,accent}){
+  return(
+    <div style={{background:C.surface,border:`1px solid ${accent?C.accent:C.border}`,borderRadius:10,padding:"13px 15px",position:"relative",overflow:"hidden"}}>
+      {accent&&<div style={{position:"absolute",top:0,left:0,right:0,height:2,background:C.accent}}/>}
+      <div style={{fontSize:10,color:C.textDim,letterSpacing:1,textTransform:"uppercase",marginBottom:6}}>{label}</div>
+      <div style={{fontSize:color?18:14,fontWeight:700,color:color||C.text,lineHeight:1.2}}>{value||"—"}</div>
+    </div>
+  );
+}
+function SectionHeader({title}){
+  return <div style={{fontSize:10,fontWeight:700,color:C.textDim,letterSpacing:1.3,textTransform:"uppercase",marginBottom:12,paddingBottom:8,borderBottom:`1px solid ${C.border}`}}>{title}</div>;
+}
+function Table({headers,rows}){
+  return(
+    <div style={{overflowX:"auto"}}>
+      <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+        <thead><tr>{headers.map((h,i)=><th key={i} style={{textAlign:"left",padding:"7px 10px",color:C.textDim,fontWeight:600,fontSize:10,letterSpacing:0.8,textTransform:"uppercase",borderBottom:`1px solid ${C.border}`,whiteSpace:"nowrap"}}>{h}</th>)}</tr></thead>
+        <tbody>{(rows||[]).map((row,i)=>(
+          <tr key={i} style={{borderBottom:`1px solid ${C.border}`,background:i%2===0?"transparent":"rgba(255,255,255,0.015)"}}>
+            {row.map((cell,j)=><td key={j} style={{padding:"8px 10px",color:j===0?C.text:C.textSub,fontWeight:j===0?600:400,whiteSpace:"nowrap"}}>{cell||"—"}</td>)}
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+function HMRow({tf,data,weight}){
+  if(!data||!Object.keys(data).length) return null;
+  const zone=zoneColor(data.zone);
+  const redAbove=(data.red_vs_50||"").toLowerCase().includes("above");
+  const exhaustion=(data.exhaustion||"").toLowerCase()==="yes";
+  return(
+    <div style={{display:"grid",gridTemplateColumns:"95px 68px 72px 72px 85px 105px 78px 1fr",gap:5,padding:"9px 10px",borderBottom:`1px solid ${C.border}`,alignItems:"center",fontSize:11}}>
+      <div style={{fontWeight:700}}>{tf}<span style={{fontSize:9,color:C.textDim,marginLeft:4}}>{weight}</span></div>
+      <div style={{color:C.gold,fontWeight:600}}>{data.black_rsi||"—"}</div>
+      <div style={{color:C.green,fontWeight:600}}>{data.green_ema||"—"}</div>
+      <div style={{color:C.red,fontWeight:600}}>{data.red_wma||"—"}</div>
+      <div style={{padding:"3px 6px",borderRadius:8,background:zone.bg,color:zone.color,fontSize:10,fontWeight:700,textAlign:"center"}}>{zone.label}</div>
+      <div style={{padding:"3px 6px",borderRadius:8,background:redAbove?C.greenDim:C.redDim,color:redAbove?C.green:C.red,fontSize:10,fontWeight:600,textAlign:"center"}}>{data.red_vs_50||"—"}</div>
+      <div style={{padding:"3px 6px",borderRadius:8,background:exhaustion?C.amberDim:"transparent",color:exhaustion?C.amber:C.textDim,fontSize:10,fontWeight:600,textAlign:"center"}}>{exhaustion?"⚠ Yes":"No"}</div>
+      <div style={{padding:"3px 6px",borderRadius:8,background:hmSigStyle(data.signal).bg,color:hmSigStyle(data.signal).color,fontSize:10,fontWeight:700,textAlign:"center"}}>{data.signal||"—"}</div>
+    </div>
+  );
+}
+function UploadZone({loading,dragOver,setDragOver,onFiles,fileRef,label,hint}){
+  return(
+    <>
+      <div onClick={()=>fileRef.current.click()}
+        onDragOver={e=>{e.preventDefault();setDragOver(true);}}
+        onDragLeave={()=>setDragOver(false)}
+        onDrop={e=>{e.preventDefault();setDragOver(false);onFiles([...e.dataTransfer.files]);}}
+        style={{border:`1.5px dashed ${dragOver?C.accent:C.border2}`,borderRadius:10,padding:"22px 16px",textAlign:"center",cursor:"pointer",background:dragOver?C.accentDim:C.surface2,transition:"all 0.15s"}}>
+        {loading
+          ?<><div style={{fontSize:20,marginBottom:6}}>⏳</div><div style={{fontSize:13,color:C.textSub}}>{loading}</div><div style={{fontSize:11,color:C.textDim,marginTop:3}}>Takes 10–20 seconds…</div></>
+          :<><div style={{fontSize:24,marginBottom:6}}>📄</div><div style={{fontSize:13,fontWeight:600}}>{label||"Drop PDF here"}</div><div style={{fontSize:11,color:C.textDim,marginTop:3}}>{hint||"or click to browse"}</div></>
+        }
+      </div>
+      <input ref={fileRef} type="file" accept=".pdf" style={{display:"none"}} onChange={e=>onFiles([...e.target.files])}/>
+    </>
+  );
+}
+
+// ── Claude API ────────────────────────────────────────────────────
+async function callClaude(b64,prompt,apiKey,isText){
+  if(!apiKey||apiKey.length<10) throw new Error("API key not set");
+  const content=isText?[{type:"text",text:prompt}]:[
+    {type:"document",source:{type:"base64",media_type:"application/pdf",data:b64.split(",")[1]}},
+    {type:"text",text:prompt}
+  ];
+  const resp=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+    body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:3000,messages:[{role:"user",content}]})
+  });
+  const data=await resp.json();
+  if(data.error) throw new Error(data.error.message);
+  const txt=data.content?.find(c=>c.type==="text")?.text||"{}";
+  const clean=txt.replace(/```json|```/g,"").trim();
+  const start=clean.indexOf("{");const end=clean.lastIndexOf("}");
+  if(start===-1||end===-1) throw new Error("No JSON found in response");
+  return JSON.parse(clean.slice(start,end+1));
+}
+
+async function extractAnalysis(b64,apiKey){
+  const prompt=`Extract ALL data from this PSX analysis PDF. Return ONLY valid JSON:
+{"scriptName":"TICKER","date":"DD Month YYYY","verdict":"full verdict","fundamentalView":"phrase","mainPositives":"comma separated","mainRisks":"comma separated","latestClose":"number","high20d":"number","low20d":"number","dma20":"number","dma50":"number","dma100":"number","rsi":"number","atr":"number","techView":"short phrase","keyLevels":[{"level":"range","meaning":"desc"}],"tradingPlan":[{"scenario":"name","entry":"range","stopLoss":"price","target1":"price","target2":"price","view":"note"}],"fairValue":[{"case":"Conservative or Base or Bull","epsAssumption":"range","pe":"multiplier","fairValue":"range"}],"canDouble":"yes/no with reason"}`;
+  return await callClaude(b64,prompt,apiKey,false);
+}
+
+async function extractHM(b64,apiKey){
+  const prompt=`Extract Hilega-Milega indicator data from this PSX analysis PDF. Return ONLY valid JSON:
+{"scriptName":"TICKER","date":"DD Month YYYY","consensus":"BUY or SELL or HOLD or WAIT","conviction":"HIGH or MEDIUM or LOW","aligned":"e.g. 3/4","summary":"2-3 sentence momentum summary","distanceAssessment":"separating or converging description","monthly":{"black_rsi":"number","green_ema":"number","red_wma":"number","zone":"Pink or Cyan","red_vs_50":"Above 50 or Below 50 or Near 50","exhaustion":"Yes or No","signal":"signal"},"biweekly":{"black_rsi":"number","green_ema":"number","red_wma":"number","zone":"Pink or Cyan","red_vs_50":"Above 50 or Below 50 or Near 50","exhaustion":"Yes or No","signal":"signal"},"weekly":{"black_rsi":"number","green_ema":"number","red_wma":"number","zone":"Pink or Cyan","red_vs_50":"Above 50 or Below 50 or Near 50","exhaustion":"Yes or No","signal":"signal"},"daily":{"black_rsi":"number","green_ema":"number","red_wma":"number","zone":"Pink or Cyan","red_vs_50":"Above 50 or Below 50 or Near 50","exhaustion":"Yes or No","signal":"signal"},"entryZone":"price range","stopLoss":"price","trailingStop":"description","riskFlag":"any risk notes"}`;
+  return await callClaude(b64,prompt,apiKey,false);
+}
+
+async function generateConclusion(analysisEntry,hmEntry,apiKey){
+  if(!apiKey||apiKey.length<10) throw new Error("API key not set");
+  const prompt=`You are a PSX trading analyst. Based on the following data for ${analysisEntry.symbol||"this stock"}, generate a comprehensive trading conclusion.
+
+ANALYSIS DATA:
+- Latest Close: Rs ${analysisEntry.latestClose||"N/A"}
+- Verdict: ${analysisEntry.verdict||"N/A"}
+- Fundamental View: ${analysisEntry.fundamentalView||"N/A"}
+- Positives: ${analysisEntry.mainPositives||"N/A"}
+- Risks: ${analysisEntry.mainRisks||"N/A"}
+- RSI: ${analysisEntry.rsi||"N/A"}
+- Tech View: ${analysisEntry.techView||"N/A"}
+- Can Double: ${analysisEntry.canDouble||"N/A"}
+- Key Levels: ${JSON.stringify(analysisEntry.keyLevels||[])}
+- Trading Plan: ${JSON.stringify(analysisEntry.tradingPlan||[])}
+- Fair Value: ${JSON.stringify(analysisEntry.fairValue||[])}
+
+HM INDICATOR DATA:
+- Consensus: ${hmEntry?.consensus||"N/A"}
+- Conviction: ${hmEntry?.conviction||"N/A"}
+- Timeframes Aligned: ${hmEntry?.aligned||"N/A"}
+- Monthly Zone: ${hmEntry?.monthly?.zone||"N/A"} | Red vs 50: ${hmEntry?.monthly?.red_vs_50||"N/A"}
+- Bi-Weekly Zone: ${hmEntry?.biweekly?.zone||"N/A"} | Red vs 50: ${hmEntry?.biweekly?.red_vs_50||"N/A"}
+- Weekly Zone: ${hmEntry?.weekly?.zone||"N/A"} | Red vs 50: ${hmEntry?.weekly?.red_vs_50||"N/A"}
+- Daily Zone: ${hmEntry?.daily?.zone||"N/A"} | Red vs 50: ${hmEntry?.daily?.red_vs_50||"N/A"}
+- HM Summary: ${hmEntry?.summary||"N/A"}
+- Entry Zone: ${hmEntry?.entryZone||"N/A"}
+- Stop Loss: ${hmEntry?.stopLoss||"N/A"}
+- Risk Flag: ${hmEntry?.riskFlag||"N/A"}
+
+Return ONLY valid JSON:
+{
+  "finalVerdict": "BUY or SELL or HOLD or WAIT",
+  "confidence": "HIGH or MEDIUM or LOW",
+  "overallSummary": "3-4 sentence overall assessment combining both analysis and HM data",
+  "fundamentalScore": "Positive or Neutral or Negative",
+  "technicalScore": "Bullish or Neutral or Bearish",
+  "hmScore": "Bullish or Neutral or Bearish",
+  "alignmentNote": "Are fundamental, technical and HM all saying the same thing? 1-2 sentences",
+  "actionPlan": "Clear specific action to take right now in 1-2 sentences",
+  "entryStrategy": "When and how to enter",
+  "exitStrategy": "When and how to exit",
+  "stopLoss": "specific stop loss level",
+  "targetPrice": "realistic target price",
+  "timeHorizon": "short/medium/long term and duration",
+  "topRisk": "The single biggest risk to watch",
+  "watchList": ["thing to watch 1","thing to watch 2","thing to watch 3"]
+}`;
+
+  const resp=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+    body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:2000,messages:[{role:"user",content:[{type:"text",text:prompt}]}]})
+  });
+  const data=await resp.json();
+  if(data.error) throw new Error(data.error.message);
+  const txt=data.content?.find(c=>c.type==="text")?.text||"{}";
+  return JSON.parse(txt.replace(/```json|```/g,"").trim());
+}
+
+// ── App ───────────────────────────────────────────────────────────
+function App(){
+  const [scripts,setScripts]=useState({});
+  const [livePrices,setLivePrices]=useState({});
+  const [priceLoading,setPriceLoading]=useState(false);
+  const [lastPriceUpdate,setLastPriceUpdate]=useState(null);
+  const [alerts,setAlerts]=useState({});// {symbol:[{type,price,label,triggered}]}
+  const [hmData,setHmData]=useState({});
+  const [conclusions,setConclusions]=useState({});
+  const [selected,setSelected]=useState(null);
+  const [selDate,setSelDate]=useState(null);
+  const [activeTab,setActiveTab]=useState("analysis");
+  const [addingAnalysis,setAddingAnalysis]=useState(false);
+  const [addingHM,setAddingHM]=useState(false);
+  const [showSettings,setShowSettings]=useState(false);
+  const [apiKey,setApiKey]=useState("");
+  const [dragOverA,setDragOverA]=useState(false);
+  const [dragOverH,setDragOverH]=useState(false);
+  const [loadingA,setLoadingA]=useState("");
+  const [loadingH,setLoadingH]=useState("");
+  const [loadingC,setLoadingC]=useState(false);
+  const [dbLoading,setDbLoading]=useState(true);
+  const [manualName,setManualName]=useState("");
+  const [toast,setToast]=useState(null);
+  const [pdfOpen,setPdfOpen]=useState(false);
+  const [dbStatus,setDbStatus]=useState("connecting");
+  const [myNotes,setMyNotes]=useState({});
+  const [savingNotes,setSavingNotes]=useState(false);
+  const fileRefA=useRef();
+  const fileRefH=useRef();
+
+  useEffect(()=>{
+    setApiKey(localStorage.getItem("psx-claude-key")||"");
+    loadFromDB();
+  },[]);
+
+  const loadFromDB=async()=>{
+    setDbLoading(true);setDbStatus("connecting");
+    try{
+      const [g,hm,conc]=await Promise.all([loadAll(),loadAllHM(),loadAllConclusions()]);
+      setScripts(g);setHmData(hm);setConclusions(conc);
+      // restore notes from conclusions
+      const notes={};for(const [sym,c] of Object.entries(conc)){notes[sym]=c.my_notes||"";}
+      setMyNotes(notes);
+      const k=Object.keys(g)[0];if(k){setSelected(k);setSelDate(g[k][0]?.date);}
+      setDbStatus("ok");
+      // Fetch live prices for all symbols
+      const syms=Object.keys(g);
+      if(syms.length>0) refreshPrices(syms,g);
+      // Build alerts from trading plans
+      buildAlerts(g);
+    }catch(e){setDbStatus("error");showToast("Cloud connection failed",true);console.error(e);}
+    setDbLoading(false);
+  };
+
+  const showToast=(msg,err)=>{setToast({msg,err});setTimeout(()=>setToast(null),3500);};
+
+  const refreshPrices=async(syms,scriptsData)=>{
+    setPriceLoading(true);
+    const sList=syms||Object.keys(scripts);
+    const prices=await fetchAllPrices(sList);
+    setLivePrices(prices);
+    setLastPriceUpdate(new Date());
+    // Check alerts
+    const sData=scriptsData||scripts;
+    checkAlertTriggers(prices,sData);
+    setPriceLoading(false);
+  };
+
+  const buildAlerts=g=>{
+    const built={};
+    for(const [sym,entries] of Object.entries(g)){
+      const e=entries[0];if(!e) continue;
+      const plan=parseJ(e.trading_plan||e.tradingPlan);
+      const als=[];
+      for(const row of plan){
+        if(row.entry) als.push({type:"entry",price:row.entry,label:row.scenario,triggered:false,color:"#F59E0B"});
+        if(row.stopLoss) als.push({type:"stop",price:row.stopLoss,label:row.scenario,triggered:false,color:"#EF4444"});
+        if(row.target1) als.push({type:"target",price:row.target1,label:`${row.scenario} — T1`,triggered:false,color:"#10B981"});
+        if(row.target2) als.push({type:"target",price:row.target2,label:`${row.scenario} — T2`,triggered:false,color:"#10B981"});
+      }
+      if(als.length>0) built[sym]=als;
+    }
+    setAlerts(built);
+  };
+
+  const checkAlertTriggers=(prices,scriptsData)=>{
+    const triggered=[];
+    for(const [sym,price] of Object.entries(prices)){
+      const cp=parseFloat(price.price);if(isNaN(cp)) continue;
+      const sAlerts=alerts[sym]||[];
+      for(const al of sAlerts){
+        // Extract number from price range like "40.00-41.50"
+        const parts=(al.price||"").toString().replace(/[^0-9.-]/g,"").split("-");
+        const lo=parseFloat(parts[0]);const hi=parseFloat(parts[1]||parts[0]);
+        if(!isNaN(lo)&&cp>=lo&&cp<=(isNaN(hi)?lo*1.02:hi)){
+          triggered.push({sym,label:al.label,price:cp,color:al.color});
+        }
+      }
+    }
+    if(triggered.length>0){
+      triggered.forEach(t=>showToast(`⚡ ${t.sym}: ${t.label} @ Rs ${t.price}`,false));
+    }
+  };
+  const saveApiKey=()=>{localStorage.setItem("psx-claude-key",apiKey);setShowSettings(false);showToast("API key saved!");};
+  const keySet=(localStorage.getItem("psx-claude-key")||"").length>10;
+  const parseJ=v=>{if(Array.isArray(v))return v;if(typeof v==="string"){try{return JSON.parse(v);}catch{return[];}}return[];};
+  const parseO=v=>{if(v&&typeof v==="object"&&!Array.isArray(v))return v;if(typeof v==="string"){try{return JSON.parse(v);}catch{return null;}}return null;};
+  const readFile=file=>new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result);r.onerror=rej;r.readAsDataURL(file);});
+
+  // Auto-generate conclusion when both analysis + HM exist
+  const autoGenerateConclusion=async(symbol,analysisEntry,hmEntry)=>{
+    const ak=localStorage.getItem("psx-claude-key")||"";
+    if(!ak||ak.length<10) return;
+    if(!analysisEntry||!hmEntry) return;
+    try{
+      setLoadingC(true);
+      const result=await generateConclusion(analysisEntry,hmEntry,ak);
+      const row={
+        symbol,
+        updated_at:new Date().toISOString(),
+        final_verdict:result.finalVerdict||"",
+        confidence:result.confidence||"",
+        overall_summary:result.overallSummary||"",
+        fundamental_score:result.fundamentalScore||"",
+        technical_score:result.technicalScore||"",
+        hm_score:result.hmScore||"",
+        alignment_note:result.alignmentNote||"",
+        action_plan:result.actionPlan||"",
+        entry_strategy:result.entryStrategy||"",
+        exit_strategy:result.exitStrategy||"",
+        stop_loss:result.stopLoss||"",
+        target_price:result.targetPrice||"",
+        time_horizon:result.timeHorizon||"",
+        top_risk:result.topRisk||"",
+        watch_list:JSON.stringify(result.watchList||[]),
+        my_notes:myNotes[symbol]||""
+      };
+      await upsertBySymbol("conclusions",row);
+      setConclusions(prev=>({...prev,[symbol]:{...row,id:Date.now()}}));
+      showToast(`✓ ${symbol} conclusion generated!`);
+    }catch(e){showToast("Conclusion failed: "+e.message,true);console.error(e);}
+    setLoadingC(false);
+  };
+
+  const saveNotes=async()=>{
+    if(!selected) return;
+    setSavingNotes(true);
+    try{
+      const c=conclusions[selected];
+      if(c?.id){
+        await updateRow("conclusions",c.id,{my_notes:myNotes[selected]||"",updated_at:new Date().toISOString()});
+        setConclusions(prev=>({...prev,[selected]:{...prev[selected],my_notes:myNotes[selected]||""}}));
+      }else{
+        // No conclusion yet — save notes only row
+        const row={symbol:selected,updated_at:new Date().toISOString(),my_notes:myNotes[selected]||"",final_verdict:"",confidence:"",overall_summary:"",fundamental_score:"",technical_score:"",hm_score:"",alignment_note:"",action_plan:"",entry_strategy:"",exit_strategy:"",stop_loss:"",target_price:"",time_horizon:"",top_risk:"",watch_list:"[]"};
+        const saved=await upsertBySymbol("conclusions",row);
+        const savedRow=Array.isArray(saved)?saved[0]:saved;
+        setConclusions(prev=>({...prev,[selected]:{...row,id:savedRow?.id||Date.now()}}));
+      }
+      showToast("Notes saved!");
+    }catch(e){showToast("Save failed",true);}
+    setSavingNotes(false);
+  };
+
+  // ── Upload Analysis PDF ───────────────────────────────────────
+  const handleAnalysisFiles=async files=>{
+    if(!keySet){showToast("Add Claude API key first",true);setShowSettings(true);return;}
+    const file=files[0];if(!file||!file.name.endsWith(".pdf")) return;
+    setLoadingA(`Extracting ${file.name}…`);
+    const b64=await readFile(file);
+    let info={};
+    try{info=await extractAnalysis(b64,localStorage.getItem("psx-claude-key"));}
+    catch(e){showToast("Extraction failed: "+e.message,true);setLoadingA("");return;}
+    const name=(info.scriptName||manualName||file.name.replace(".pdf","")).toUpperCase();
+    const existing=scripts[name]||[];
+    if(existing.find(e=>e.date===info.date)){showToast(`${name} ${info.date} already exists`,true);setLoadingA("");return;}
+    const row={symbol:name,file_name:file.name,uploaded_at:new Date().toISOString(),b64,date:info.date||"",verdict:info.verdict||"",fundamental_view:info.fundamentalView||"",main_positives:info.mainPositives||"",main_risks:info.mainRisks||"",latest_close:info.latestClose||"",high_20d:info.high20d||"",low_20d:info.low20d||"",dma20:info.dma20||"",dma50:info.dma50||"",dma100:info.dma100||"",rsi:info.rsi||"",atr:info.atr||"",tech_view:info.techView||"",key_levels:JSON.stringify(info.keyLevels||[]),trading_plan:JSON.stringify(info.tradingPlan||[]),fair_value:JSON.stringify(info.fairValue||[]),can_double:info.canDouble||""};
+    try{
+      setLoadingA(`Saving ${name} to cloud…`);
+      const saved=await saveRow("scripts",row);
+      const savedRow=Array.isArray(saved)?saved[0]:saved;
+      const full={...row,id:savedRow?.id||Date.now()};
+      setScripts(prev=>{const u={...prev};if(!u[name])u[name]=[];u[name]=[full,...u[name]];return u;});
+      setSelected(name);setSelDate(row.date);setActiveTab("analysis");
+      showToast(`✓ ${name} analysis saved!`);
+      // Auto-generate conclusion if HM also exists
+      if(hmData[name]){
+        const hmP=parseHMEntry(hmData[name]);
+        const aP={...row,latestClose:row.latest_close,fundamentalView:row.fundamental_view,mainPositives:row.main_positives,mainRisks:row.main_risks,techView:row.tech_view,canDouble:row.can_double,keyLevels:parseJ(row.key_levels),tradingPlan:parseJ(row.trading_plan),fairValue:parseJ(row.fair_value),symbol:name};
+        setTimeout(()=>autoGenerateConclusion(name,aP,hmP),500);
+      }
+    }catch(e){showToast("Save failed: "+e.message,true);}
+    setLoadingA("");setAddingAnalysis(false);setManualName("");
+  };
+
+  // ── Upload HM PDF ─────────────────────────────────────────────
+  const handleHMFiles=async files=>{
+    if(!keySet){showToast("Add Claude API key first",true);setShowSettings(true);return;}
+    if(!selected){showToast("Select a script first",true);return;}
+    const file=files[0];if(!file||!file.name.endsWith(".pdf")) return;
+    setLoadingH(`Extracting HM data…`);
+    const b64=await readFile(file);
+    let info={};
+    try{info=await extractHM(b64,localStorage.getItem("psx-claude-key"));}
+    catch(e){showToast("HM extraction failed: "+e.message,true);setLoadingH("");return;}
+    const row={symbol:selected,file_name:file.name,uploaded_at:new Date().toISOString(),b64,date:info.date||"",consensus:info.consensus||"",conviction:info.conviction||"",aligned:info.aligned||"",summary:info.summary||"",distance_assessment:info.distanceAssessment||"",monthly:JSON.stringify(info.monthly||{}),biweekly:JSON.stringify(info.biweekly||{}),weekly:JSON.stringify(info.weekly||{}),daily:JSON.stringify(info.daily||{}),entry_zone:info.entryZone||"",stop_loss:info.stopLoss||"",trailing_stop:info.trailingStop||"",risk_flag:info.riskFlag||""};
+    try{
+      setLoadingH(`Saving HM data…`);
+      const saved=await upsertBySymbol("hm_scripts",row);
+      const savedRow=Array.isArray(saved)?saved[0]:saved;
+      const full={...row,id:savedRow?.id||Date.now()};
+      setHmData(prev=>({...prev,[selected]:full}));
+      showToast(`✓ ${selected} HM data updated!`);
+      setActiveTab("hm");
+      // Auto-generate conclusion if analysis also exists
+      const latestAnalysis=scripts[selected]?.[0];
+      if(latestAnalysis){
+        const hmP=parseHMEntry(full);
+        const aP={...latestAnalysis,latestClose:latestAnalysis.latest_close,fundamentalView:latestAnalysis.fundamental_view,mainPositives:latestAnalysis.main_positives,mainRisks:latestAnalysis.main_risks,techView:latestAnalysis.tech_view,canDouble:latestAnalysis.can_double,keyLevels:parseJ(latestAnalysis.key_levels),tradingPlan:parseJ(latestAnalysis.trading_plan),fairValue:parseJ(latestAnalysis.fair_value),symbol:selected};
+        setTimeout(()=>autoGenerateConclusion(selected,aP,hmP),500);
+      }
+    }catch(e){showToast("HM save failed: "+e.message,true);}
+    setLoadingH("");setAddingHM(false);
+  };
+
+  const parseHMEntry=h=>h?{
+    ...h,
+    distanceAssessment:h.distance_assessment||"",entryZone:h.entry_zone||"",stopLoss:h.stop_loss||"",trailingStop:h.trailing_stop||"",riskFlag:h.risk_flag||"",
+    monthly:parseO(h.monthly)||{},biweekly:parseO(h.biweekly)||{},weekly:parseO(h.weekly)||{},daily:parseO(h.daily)||{},
+  }:null;
+
+  const deleteScript=async name=>{
+    if(!window.confirm(`Delete all data for ${name}?`)) return;
+    try{
+      for(const e of scripts[name]||[]) await delRow("scripts",e.id);
+      if(hmData[name]) await delRow("hm_scripts",hmData[name].id);
+      if(conclusions[name]) await delRow("conclusions",conclusions[name].id);
+      const u={...scripts};delete u[name];setScripts(u);
+      const hmu={...hmData};delete hmu[name];setHmData(hmu);
+      const cu={...conclusions};delete cu[name];setConclusions(cu);
+      const k=Object.keys(u)[0];setSelected(k||null);setSelDate(k?u[k][0]?.date:null);setPdfOpen(false);
+      showToast(`${name} deleted`);
+    }catch(e){showToast("Delete failed",true);}
+  };
+
+  const deleteEntry=async(sName,id)=>{
+    if(!window.confirm("Delete this analysis?")) return;
+    try{
+      await delRow("scripts",id);
+      const u={...scripts};u[sName]=u[sName].filter(e=>e.id!==id);
+      if(!u[sName].length) delete u[sName];setScripts(u);
+      const rem=u[sName]||[];setSelDate(rem[0]?.date||null);
+      if(!u[sName]){const k=Object.keys(u)[0];setSelected(k||null);}
+      setPdfOpen(false);showToast("Entry deleted");
+    }catch(e){showToast("Delete failed",true);}
+  };
+
+  // ── Derived ───────────────────────────────────────────────────
+  const scriptList=Object.keys(scripts).sort();
+  const entries=selected?scripts[selected]||[]:[];
+  const rawEntry=selDate?entries.find(e=>e.date===selDate)||entries[0]:entries[0];
+  const hmRaw=selected?hmData[selected]:null;
+  const hm=parseHMEntry(hmRaw);
+  const conc=selected?conclusions[selected]:null;
+
+  const entry=rawEntry?{
+    ...rawEntry,
+    fundamentalView:rawEntry.fundamental_view||"",mainPositives:rawEntry.main_positives||"",mainRisks:rawEntry.main_risks||"",
+    latestClose:rawEntry.latest_close||"",high20d:rawEntry.high_20d||"",low20d:rawEntry.low_20d||"",
+    techView:rawEntry.tech_view||"",canDouble:rawEntry.can_double||"",fileName:rawEntry.file_name||"",
+    keyLevels:parseJ(rawEntry.key_levels),tradingPlan:parseJ(rawEntry.trading_plan),fairValue:parseJ(rawEntry.fair_value),
+  }:null;
+
+  const vs=vStyle(entry?.verdict||"");
+  const hmCS=hmSigStyle(hm?.consensus||"");
+  const concVS=vStyle(conc?.final_verdict||"");
+  const total=Object.values(scripts).reduce((a,b)=>a+b.length,0);
+  const watchList=conc?parseJ(conc.watch_list):[];
+  const inp={width:"100%",fontSize:13,padding:"9px 12px",borderRadius:8,border:`1px solid ${C.border2}`,background:C.surface2,color:C.text,outline:"none",marginTop:5};
+  const btnSm={padding:"7px 12px",borderRadius:7,border:`1px solid ${C.border2}`,background:"transparent",color:C.textSub,fontSize:11,cursor:"pointer",fontWeight:600};
+
+  const scoreColor=s=>{const l=(s||"").toLowerCase();return l.includes("pos")||l.includes("bull")?C.green:l.includes("neg")||l.includes("bear")?C.red:C.amber;};
+
+  return(
+    <div style={{display:"flex",height:"100vh",background:C.bg,color:C.text,fontSize:13,overflow:"hidden"}}>
+
+      {toast&&<div style={{position:"fixed",top:16,right:16,zIndex:999,background:toast.err?C.red:C.green,color:"#fff",padding:"10px 18px",borderRadius:8,fontWeight:600,fontSize:12,boxShadow:"0 4px 20px rgba(0,0,0,0.5)"}}>{toast.msg}</div>}
+
+      {/* SIDEBAR */}
+      <div style={{width:225,minWidth:200,background:C.surface,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",flexShrink:0}}>
+        <div style={{padding:"16px 14px 12px",borderBottom:`1px solid ${C.border}`}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+            <div style={{display:"flex",alignItems:"center",gap:9}}>
+              <div style={{width:28,height:28,borderRadius:8,background:C.accent,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:800,color:"#fff"}}>P</div>
+              <div><div style={{fontSize:13,fontWeight:700}}>PSX Tracker</div><div style={{fontSize:10,color:C.textDim}}>Analysis Dashboard</div></div>
+            </div>
+            <button onClick={()=>{setApiKey(localStorage.getItem("psx-claude-key")||"");setShowSettings(true);}} style={{background:"transparent",border:"none",color:keySet?C.green:C.amber,fontSize:16,cursor:"pointer"}}>⚙</button>
+          </div>
+          <div style={{marginBottom:10,padding:"6px 10px",borderRadius:7,fontSize:11,fontWeight:600,
+            background:dbStatus==="ok"?C.greenDim:dbStatus==="error"?C.redDim:C.amberDim,
+            color:dbStatus==="ok"?C.green:dbStatus==="error"?C.red:C.amber,
+            border:`1px solid ${dbStatus==="ok"?C.green:dbStatus==="error"?C.red:C.amber}`}}>
+            {dbStatus==="connecting"?"☁ Connecting…":dbStatus==="ok"?"☁ Cloud connected ✓":"⚠ Cloud error"}
+          </div>
+          <div style={{display:"flex",gap:6,marginBottom:10}}>
+            {[["Scripts",scriptList.length],["Analyses",total]].map(([l,v])=>(
+              <div key={l} style={{flex:1,background:C.surface2,border:`1px solid ${C.border}`,borderRadius:8,padding:"7px 8px",textAlign:"center"}}>
+                <div style={{fontSize:15,fontWeight:700}}>{v}</div>
+                <div style={{fontSize:9,color:C.textDim,textTransform:"uppercase",letterSpacing:0.8}}>{l}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:6,marginBottom:8}}>
+            <button onClick={loadFromDB} style={{...btnSm,flex:1,fontSize:10}}>↻ Cloud</button>
+            <button onClick={()=>refreshPrices()} style={{...btnSm,flex:1,fontSize:10,color:priceLoading?C.amber:C.green,border:`1px solid ${priceLoading?C.amber:C.green}`}}>{priceLoading?"Fetching…":"💰 Prices"}</button>
+          </div>
+          {lastPriceUpdate&&<div style={{fontSize:9,color:C.textDim,marginBottom:6,textAlign:"center"}}>Prices: {lastPriceUpdate.toLocaleTimeString("en-PK",{hour:"2-digit",minute:"2-digit"})}</div>}
+          {!keySet&&<div style={{background:C.amberDim,border:`1px solid ${C.amber}`,borderRadius:7,padding:"7px 10px",fontSize:11,color:C.amber}}>⚠ Add Claude API key in ⚙</div>}
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:"10px 8px"}}>
+          <div style={{fontSize:9,fontWeight:700,color:C.textDim,letterSpacing:1.4,textTransform:"uppercase",padding:"4px 8px 8px"}}>Watchlist</div>
+          {dbLoading&&<div style={{padding:"10px 8px",fontSize:12,color:C.textDim}}>Loading…</div>}
+          {!dbLoading&&scriptList.length===0&&<div style={{padding:"10px 8px",fontSize:12,color:C.textDim}}>No scripts yet.</div>}
+          {scriptList.map(s=>{
+            const e=scripts[s][0];const sv=vStyle(e?.verdict||"");const isA=selected===s;
+            const sHM=hmData[s];const hmC=hmSigStyle(sHM?.consensus||"");
+            const sConc=conclusions[s];const cV=vStyle(sConc?.final_verdict||"");
+            return(
+              <div key={s} onClick={()=>{setSelected(s);setSelDate(scripts[s][0]?.date);setPdfOpen(false);}}
+                style={{padding:"10px",borderRadius:8,cursor:"pointer",marginBottom:2,background:isA?C.accentDim:"transparent",border:`1px solid ${isA?C.accent:"transparent"}`,transition:"all 0.12s"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                  <span style={{fontWeight:700,fontSize:13}}>{s}</span>
+                  <div style={{display:"flex",alignItems:"center",gap:5}}>
+                    <div style={{width:7,height:7,borderRadius:"50%",background:sv.dot}}/>
+                    <span onClick={ev=>{ev.stopPropagation();deleteScript(s);}} style={{fontSize:11,color:C.textDim,cursor:"pointer"}}>✕</span>
+                  </div>
+                </div>
+                {(livePrices[s]||e?.latest_close)&&<div style={{fontSize:11,color:C.textDim,display:"flex",alignItems:"center",gap:5}}>
+                  {livePrices[s]?(
+                    <>
+                      <span style={{color:C.text,fontWeight:600}}>Rs {parseFloat(livePrices[s].price).toFixed(2)}</span>
+                      {livePrices[s].changePct&&<span style={{fontSize:9,color:livePrices[s].changePct>=0?C.green:C.red,fontWeight:700}}>{livePrices[s].changePct>=0?"▲":"▼"}{Math.abs(livePrices[s].changePct).toFixed(2)}%</span>}
+                      <span style={{fontSize:9,color:C.textDim}}>LIVE</span>
+                    </>
+                  ):<span>Rs {e.latest_close}</span>}
+                  <span style={{color:sv.color,fontSize:10}}>· {sv.label}</span>
+                </div>}
+                <div style={{display:"flex",gap:4,marginTop:4,flexWrap:"wrap"}}>
+                  {sHM?.consensus&&<span style={{fontSize:9,padding:"2px 6px",borderRadius:6,background:hmC.bg,color:hmC.color,fontWeight:700}}>HM: {sHM.consensus}</span>}
+                  {sConc?.final_verdict&&<span style={{fontSize:9,padding:"2px 6px",borderRadius:6,background:cV.bg,color:cV.color,fontWeight:700}}>🎯 {sConc.final_verdict}</span>}
+                </div>
+                <div style={{fontSize:9,color:C.textDim,marginTop:3}}>{scripts[s].length} {scripts[s].length===1?"analysis":"analyses"}</div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{padding:12,borderTop:`1px solid ${C.border}`}}>
+          <button onClick={()=>setAddingAnalysis(true)} style={{width:"100%",padding:"9px 0",borderRadius:8,background:C.accent,border:"none",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer"}}>+ Upload Analysis PDF</button>
+        </div>
+      </div>
+
+      {/* MAIN */}
+      <div style={{flex:1,overflowY:"auto",padding:20,background:C.bg,minWidth:0}}>
+        {!selected?(
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"100%",color:C.textDim}}>
+            <div style={{fontSize:40,marginBottom:16}}>📊</div>
+            <div style={{fontSize:17,fontWeight:700,color:C.text,marginBottom:6}}>{dbLoading?"Loading from cloud…":"No data yet"}</div>
+            <div style={{fontSize:13,marginBottom:20}}>{dbLoading?"Please wait…":"Upload your PSX analysis PDFs to begin"}</div>
+            {!dbLoading&&<button onClick={()=>setAddingAnalysis(true)} style={{padding:"10px 28px",borderRadius:8,background:C.accent,border:"none",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>Upload Analysis PDF</button>}
+          </div>
+        ):(
+          <>
+            {/* Header */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+              <div>
+                <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:4,flexWrap:"wrap"}}>
+                  <span style={{fontSize:22,fontWeight:800}}>{selected}</span>
+                  {entry&&<Pill text={vs.label} color={vs.color} bg={vs.bg}/>}
+                  {hm?.consensus&&<Pill text={`HM: ${hm.consensus}`} color={hmCS.color} bg={hmCS.bg}/>}
+                  {conc?.final_verdict&&<Pill text={`🎯 ${conc.final_verdict}`} color={concVS.color} bg={concVS.bg}/>}
+                </div>
+                {entry&&<div style={{fontSize:11,color:C.textDim}}>{entry.date} · {entry.fileName}</div>}
+              </div>
+              <div style={{display:"flex",gap:7,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+                {entries.length>1&&activeTab==="analysis"&&(
+                  <select value={selDate||""} onChange={e=>setSelDate(e.target.value)}
+                    style={{fontSize:11,padding:"6px 9px",borderRadius:7,border:`1px solid ${C.border2}`,background:C.surface2,color:C.text,cursor:"pointer",outline:"none"}}>
+                    {entries.map(e=><option key={e.id} value={e.date}>{e.date}</option>)}
+                  </select>
+                )}
+                {entry?.b64&&activeTab==="analysis"&&<button onClick={()=>setPdfOpen(p=>!p)} style={{...btnSm,background:pdfOpen?C.accentDim:"transparent",color:pdfOpen?C.accent:C.textSub,border:`1px solid ${pdfOpen?C.accent:C.border2}`}}>{pdfOpen?"◀ Hide PDF":"▶ View PDF"}</button>}
+                {activeTab==="analysis"&&entry&&<button onClick={()=>deleteEntry(selected,entry.id)} style={{...btnSm,color:C.red,border:`1px solid ${C.redDim}`}}>Delete</button>}
+              </div>
+            </div>
+
+            {/* TABS */}
+            <div style={{display:"flex",gap:4,marginBottom:16,borderBottom:`1px solid ${C.border}`}}>
+              {[["analysis","📊 Analysis"],["hm","📈 HM Indicator"],["conclusion","🎯 Conclusion"],["alerts","🔔 Alerts"],["actionplan","🖨️ All Scripts"]].map(([t,label])=>(
+                <button key={t} onClick={()=>setActiveTab(t)} style={{padding:"8px 16px",borderRadius:"8px 8px 0 0",border:`1px solid ${C.border}`,borderBottom:activeTab===t?`1px solid ${C.bg}`:`1px solid ${C.border}`,background:activeTab===t?C.bg:C.surface,color:activeTab===t?C.text:C.textDim,fontWeight:activeTab===t?700:400,fontSize:12,cursor:"pointer",marginBottom:-1}}>
+                  {label}
+                  {t==="hm"&&hm&&<span style={{marginLeft:5,fontSize:9,padding:"2px 5px",borderRadius:8,background:hmCS.bg,color:hmCS.color}}>{hm.consensus}</span>}
+                  {t==="hm"&&!hm&&<span style={{marginLeft:5,fontSize:9,color:C.textDim}}>no data</span>}
+                  {t==="conclusion"&&conc?.final_verdict&&<span style={{marginLeft:5,fontSize:9,padding:"2px 5px",borderRadius:8,background:concVS.bg,color:concVS.color}}>{conc.final_verdict}</span>}
+                  {t==="conclusion"&&loadingC&&<span style={{marginLeft:5,fontSize:9,color:C.amber}}>generating…</span>}
+                </button>
+              ))}
+            </div>
+
+            {/* ── ANALYSIS TAB ── */}
+            {activeTab==="analysis"&&(
+              !entry?(
+                <div style={{textAlign:"center",padding:"50px 20px",color:C.textDim}}>
+                  <div style={{fontSize:28,marginBottom:12}}>📄</div>
+                  <div style={{fontSize:14,fontWeight:600,color:C.text,marginBottom:8}}>No analysis yet for {selected}</div>
+                  <button onClick={()=>setAddingAnalysis(true)} style={{padding:"9px 22px",borderRadius:8,background:C.accent,border:"none",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer"}}>Upload Analysis PDF</button>
+                </div>
+              ):(
+                <>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,marginBottom:14}}>
+                    <Card label="Latest close" value={entry.latestClose?`Rs ${entry.latestClose}`:"—"} accent/>
+                    <Card label="RSI-14" value={entry.rsi} color={rsiCol(entry.rsi)}/>
+                    <Card label="ATR-14" value={entry.atr?`Rs ${entry.atr}`:"—"} color={C.textSub}/>
+                    <Card label="50-DMA" value={entry.dma50?`Rs ${entry.dma50}`:"—"} color={C.textSub}/>
+                    <Card label="Tech view" value={entry.techView} color={C.gold}/>
+                  </div>
+                  {entry.verdict&&(<div style={{background:C.surface,border:`1px solid ${C.border}`,borderLeft:`3px solid ${vs.color}`,borderRadius:10,padding:"12px 16px",marginBottom:14,display:"flex",gap:12}}>
+                    <div style={{width:8,height:8,borderRadius:"50%",background:vs.dot,marginTop:4,flexShrink:0}}/>
+                    <div><div style={{fontSize:10,fontWeight:700,color:C.textDim,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>Quick verdict</div><div style={{fontSize:13,lineHeight:1.7}}>{entry.verdict}</div></div>
+                  </div>)}
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+                    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14}}>
+                      <SectionHeader title="Fundamental snapshot"/>
+                      <div style={{marginBottom:8}}><div style={{fontSize:10,color:C.textDim,marginBottom:3}}>View</div><div style={{fontSize:13,fontWeight:600}}>{entry.fundamentalView||"—"}</div></div>
+                      {entry.mainPositives&&<div style={{marginBottom:8}}><div style={{fontSize:10,color:C.textDim,marginBottom:5}}>Positives</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{entry.mainPositives.split(",").map((p,i)=><Pill key={i} text={p.trim()} color={C.green} bg={C.greenDim}/>)}</div></div>}
+                      {entry.mainRisks&&<div><div style={{fontSize:10,color:C.textDim,marginBottom:5}}>Risks</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{entry.mainRisks.split(",").map((r,i)=><Pill key={i} text={r.trim()} color={C.red} bg={C.redDim}/>)}</div></div>}
+                    </div>
+                    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14}}>
+                      <SectionHeader title="Technical snapshot"/>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7,marginBottom:8}}>
+                        {[["20D High",entry.high20d?`Rs ${entry.high20d}`:"—"],["20D Low",entry.low20d?`Rs ${entry.low20d}`:"—"],["20-DMA",entry.dma20?`Rs ${entry.dma20}`:"—"],["100-DMA",entry.dma100?`Rs ${entry.dma100}`:"—"]].map(([l,v])=>(
+                          <div key={l} style={{background:C.surface2,borderRadius:7,padding:"8px 10px"}}><div style={{fontSize:10,color:C.textDim,marginBottom:2}}>{l}</div><div style={{fontSize:12,fontWeight:600}}>{v}</div></div>
+                        ))}
+                      </div>
+                      {entry.canDouble&&<div style={{background:C.surface2,borderRadius:7,padding:"9px 11px"}}><div style={{fontSize:10,color:C.textDim,marginBottom:2}}>Can it double?</div><div style={{fontSize:11,color:C.textSub,lineHeight:1.5}}>{entry.canDouble}</div></div>}
+                    </div>
+                  </div>
+                  {entry.keyLevels?.length>0&&(<div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:12}}>
+                    <SectionHeader title="Key levels"/>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(165px,1fr))",gap:7}}>
+                      {entry.keyLevels.map((kl,i)=>{const m=(kl.meaning||"").toLowerCase();const c=m.includes("buy")||m.includes("accum")?C.green:m.includes("resist")||m.includes("supply")?C.red:m.includes("break")||m.includes("confirm")?C.gold:C.textSub;return(<div key={i} style={{background:C.surface2,borderRadius:7,padding:"9px 11px",borderLeft:`2px solid ${c}`}}><div style={{fontSize:12,fontWeight:700,color:c}}>Rs {kl.level}</div><div style={{fontSize:10,color:C.textDim,marginTop:2,lineHeight:1.4}}>{kl.meaning}</div></div>);})}
+                    </div>
+                  </div>)}
+                  {entry.tradingPlan?.length>0&&(<div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:12}}><SectionHeader title="Trading plan"/><Table headers={["Scenario","Entry","Stop loss","Target 1","Target 2","View"]} rows={entry.tradingPlan.map(r=>[r.scenario,r.entry,r.stopLoss,r.target1,r.target2,r.view])}/></div>)}
+                  {entry.fairValue?.length>0&&(<div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:12}}><SectionHeader title="Fair value / valuation"/><Table headers={["Case","EPS assumption","P/E","Fair value"]} rows={entry.fairValue.map(r=>[r.case,r.epsAssumption,r.pe,r.fairValue])}/></div>)}
+                  {entries.length>1&&(<div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:8}}>
+                    <SectionHeader title={`History — ${selected} (${entries.length})`}/>
+                    {entries.map((e,i)=>{const sv=vStyle(e.verdict||"");const isA=selDate===e.date;return(
+                      <div key={e.id} onClick={()=>setSelDate(e.date)} style={{display:"flex",alignItems:"center",gap:12,padding:"9px 10px",borderRadius:7,cursor:"pointer",background:isA?C.accentDim:"transparent",border:`1px solid ${isA?C.accent:"transparent"}`,marginBottom:3}}>
+                        <div style={{width:7,height:7,borderRadius:"50%",background:sv.dot,flexShrink:0}}/>
+                        <div style={{flex:1,minWidth:0}}><div style={{display:"flex",alignItems:"center",gap:7}}><span style={{fontWeight:600,fontSize:12}}>{e.date}</span>{i===0&&<Pill text="Latest" color={C.accent} bg={C.accentDim}/>}</div><div style={{fontSize:11,color:C.textDim,marginTop:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.verdict}</div></div>
+                        <div style={{fontSize:11,color:C.textDim}}>Rs {e.latest_close}</div>
+                      </div>
+                    );})}
+                  </div>)}
+                  <button onClick={()=>setAddingAnalysis(true)} style={{...btnSm,marginTop:4}}>+ Add new analysis</button>
+                </>
+              )
+            )}
+
+            {/* ── HM TAB ── */}
+            {activeTab==="hm"&&(
+              !hm?(
+                <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"50px 20px",color:C.textDim,textAlign:"center"}}>
+                  <div style={{fontSize:32,marginBottom:12}}>📈</div>
+                  <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:8}}>No HM data for {selected}</div>
+                  <div style={{fontSize:12,marginBottom:20,maxWidth:340,lineHeight:1.7}}>Upload the HM indicator PDF. All 4 timeframes extracted automatically.</div>
+                  <button onClick={()=>setAddingHM(true)} style={{padding:"10px 28px",borderRadius:8,background:C.pink,border:"none",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>Upload HM PDF</button>
+                </div>
+              ):(
+                <>
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
+                    <Card label="HM Consensus" value={hm.consensus} color={hmCS.color} accent/>
+                    <Card label="Conviction" value={hm.conviction} color={hm.conviction==="HIGH"?C.green:hm.conviction==="MEDIUM"?C.amber:C.red}/>
+                    <Card label="Aligned" value={hm.aligned} color={C.gold}/>
+                    <Card label="Entry Zone" value={hm.entryZone?`Rs ${hm.entryZone}`:"—"} color={C.textSub}/>
+                  </div>
+                  {hm.summary&&(<div style={{background:C.surface,border:`1px solid ${C.border}`,borderLeft:`3px solid ${hmCS.color}`,borderRadius:10,padding:"12px 16px",marginBottom:14}}>
+                    <div style={{fontSize:10,fontWeight:700,color:C.textDim,letterSpacing:1,textTransform:"uppercase",marginBottom:6}}>Momentum Summary</div>
+                    <div style={{fontSize:13,lineHeight:1.7}}>{hm.summary}</div>
+                    {hm.distanceAssessment&&<div style={{fontSize:12,color:C.textDim,marginTop:8,paddingTop:8,borderTop:`1px solid ${C.border}`}}>📏 {hm.distanceAssessment}</div>}
+                  </div>)}
+                  <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:12}}>
+                    <SectionHeader title="Multi-Timeframe Alignment"/>
+                    <div style={{display:"grid",gridTemplateColumns:"95px 68px 72px 72px 85px 105px 78px 1fr",gap:5,padding:"6px 10px",marginBottom:4}}>
+                      {["Timeframe","Black RSI","Green 3EMA","Red 21WMA","Zone","Red vs 50","Exhaustion","Signal"].map((h,i)=>(
+                        <div key={i} style={{fontSize:9,fontWeight:700,color:C.textDim,letterSpacing:0.8,textTransform:"uppercase"}}>{h}</div>
+                      ))}
+                    </div>
+                    <HMRow tf="Monthly" data={hm.monthly} weight="40%"/>
+                    <HMRow tf="Bi-Weekly" data={hm.biweekly} weight="30%"/>
+                    <HMRow tf="Weekly" data={hm.weekly} weight="20%"/>
+                    <HMRow tf="Daily" data={hm.daily} weight="10%"/>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+                    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14}}>
+                      <SectionHeader title="HM Trade Plan"/>
+                      {[["Entry Zone",hm.entryZone?`Rs ${hm.entryZone}`:"—",C.green],["Stop Loss",hm.stopLoss?`Rs ${hm.stopLoss}`:"—",C.red],["Trailing Stop",hm.trailingStop||"—",C.textSub]].map(([l,v,c])=>(
+                        <div key={l} style={{marginBottom:10}}><div style={{fontSize:10,color:C.textDim,marginBottom:3}}>{l}</div><div style={{fontSize:12,fontWeight:600,color:c}}>{v}</div></div>
+                      ))}
+                    </div>
+                    {hm.riskFlag&&(<div style={{background:C.surface,border:`1px solid ${C.amber}`,borderRadius:10,padding:14}}>
+                      <SectionHeader title="Risk Flag"/>
+                      <div style={{fontSize:12,color:C.amber,lineHeight:1.7}}>⚠ {hm.riskFlag}</div>
+                    </div>)}
+                  </div>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <button onClick={()=>setAddingHM(true)} style={{...btnSm,color:C.pink,border:`1px solid ${C.pinkDim}`}}>↻ Update HM PDF</button>
+                    {hm.date&&<span style={{fontSize:11,color:C.textDim}}>Last updated: {hm.date}</span>}
+                  </div>
+                </>
+              )
+            )}
+
+            {/* ── CONCLUSION TAB ── */}
+            {activeTab==="conclusion"&&(
+              <>
+                {loadingC&&(
+                  <div style={{display:"flex",alignItems:"center",gap:12,background:C.purpleDim,border:`1px solid ${C.purple}`,borderRadius:10,padding:"14px 18px",marginBottom:16}}>
+                    <div style={{fontSize:20}}>🤖</div>
+                    <div><div style={{fontSize:13,fontWeight:700,color:C.purple}}>Generating conclusion…</div><div style={{fontSize:11,color:C.textDim,marginTop:2}}>Claude is combining Analysis + HM data</div></div>
+                  </div>
+                )}
+                {!conc?.final_verdict&&!loadingC&&(
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"40px 20px",color:C.textDim,textAlign:"center"}}>
+                    <div style={{fontSize:32,marginBottom:12}}>🎯</div>
+                    <div style={{fontSize:15,fontWeight:700,color:C.text,marginBottom:8}}>No conclusion yet</div>
+                    <div style={{fontSize:12,marginBottom:20,maxWidth:380,lineHeight:1.7}}>
+                      {!entry&&!hm?"Upload both Analysis PDF and HM PDF first.":!entry?"Upload Analysis PDF first.":!hm?"Upload HM PDF to auto-generate conclusion.":"Click Generate to create the conclusion."}
+                    </div>
+                    {entry&&hm&&<button onClick={()=>{const aP={...entry,symbol:selected};autoGenerateConclusion(selected,aP,hm);}} style={{padding:"10px 28px",borderRadius:8,background:C.purple,border:"none",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>🤖 Generate Conclusion</button>}
+                  </div>
+                )}
+                {conc?.final_verdict&&!loadingC&&(
+                  <>
+                    {/* Final verdict banner */}
+                    <div style={{background:concVS.bg,border:`2px solid ${concVS.color}`,borderRadius:12,padding:"16px 20px",marginBottom:16,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                      <div>
+                        <div style={{fontSize:10,fontWeight:700,color:C.textDim,letterSpacing:1.2,textTransform:"uppercase",marginBottom:4}}>Final Verdict</div>
+                        <div style={{fontSize:28,fontWeight:800,color:concVS.color}}>{conc.final_verdict}</div>
+                        <div style={{fontSize:12,color:C.textDim,marginTop:2}}>Confidence: <span style={{color:conc.confidence==="HIGH"?C.green:conc.confidence==="MEDIUM"?C.amber:C.red,fontWeight:700}}>{conc.confidence}</span></div>
+                      </div>
+                      <button onClick={()=>{const aP={...entry,symbol:selected};autoGenerateConclusion(selected,aP,hm);}} style={{padding:"8px 16px",borderRadius:8,background:"transparent",border:`1px solid ${C.border2}`,color:C.textDim,fontSize:11,cursor:"pointer"}}>↻ Regenerate</button>
+                    </div>
+
+                    {/* Score cards */}
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
+                      <Card label="Fundamental" value={conc.fundamental_score} color={scoreColor(conc.fundamental_score)}/>
+                      <Card label="Technical" value={conc.technical_score} color={scoreColor(conc.technical_score)}/>
+                      <Card label="HM Momentum" value={conc.hm_score} color={scoreColor(conc.hm_score)}/>
+                    </div>
+
+                    {/* Overall summary */}
+                    {conc.overall_summary&&(<div style={{background:C.surface,border:`1px solid ${C.border}`,borderLeft:`3px solid ${C.purple}`,borderRadius:10,padding:"12px 16px",marginBottom:12}}>
+                      <div style={{fontSize:10,fontWeight:700,color:C.textDim,letterSpacing:1,textTransform:"uppercase",marginBottom:6}}>Overall Assessment</div>
+                      <div style={{fontSize:13,lineHeight:1.8}}>{conc.overall_summary}</div>
+                    </div>)}
+
+                    {/* Alignment note */}
+                    {conc.alignment_note&&(<div style={{background:C.surface2,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 16px",marginBottom:12}}>
+                      <div style={{fontSize:10,fontWeight:700,color:C.textDim,letterSpacing:1,textTransform:"uppercase",marginBottom:6}}>Signal Alignment</div>
+                      <div style={{fontSize:12,color:C.textSub,lineHeight:1.7}}>{conc.alignment_note}</div>
+                    </div>)}
+
+                    {/* Action plan */}
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+                      <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14}}>
+                        <SectionHeader title="Action Plan"/>
+                        {conc.action_plan&&<div style={{fontSize:13,fontWeight:600,color:concVS.color,marginBottom:12,lineHeight:1.6}}>{conc.action_plan}</div>}
+                        {[["Entry Strategy",conc.entry_strategy,C.green],["Exit Strategy",conc.exit_strategy,C.red],["Stop Loss",conc.stop_loss?`Rs ${conc.stop_loss}`:"—",C.red],["Target Price",conc.target_price?`Rs ${conc.target_price}`:"—",C.green],["Time Horizon",conc.time_horizon,C.gold]].map(([l,v,c])=>(
+                          v?<div key={l} style={{marginBottom:9}}><div style={{fontSize:10,color:C.textDim,marginBottom:2}}>{l}</div><div style={{fontSize:12,color:c,fontWeight:600,lineHeight:1.5}}>{v}</div></div>:null
+                        ))}
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                        {conc.top_risk&&(<div style={{background:C.surface,border:`1px solid ${C.amber}`,borderRadius:10,padding:14}}>
+                          <SectionHeader title="Top Risk"/>
+                          <div style={{fontSize:12,color:C.amber,lineHeight:1.7}}>⚠ {conc.top_risk}</div>
+                        </div>)}
+                        {watchList.length>0&&(<div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14}}>
+                          <SectionHeader title="Watch List"/>
+                          {watchList.map((w,i)=><div key={i} style={{fontSize:12,color:C.textSub,marginBottom:6,display:"flex",alignItems:"flex-start",gap:7}}><span style={{color:C.accent,flexShrink:0}}>→</span>{w}</div>)}
+                        </div>)}
+                      </div>
+                    </div>
+
+                    {/* My Notes */}
+                    <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:8}}>
+                      <SectionHeader title="My Personal Notes"/>
+                      <textarea
+                        value={myNotes[selected]||""}
+                        onChange={e=>setMyNotes(prev=>({...prev,[selected]:e.target.value}))}
+                        placeholder="Add your own notes, observations, reminders for this stock…"
+                        style={{...inp,minHeight:100,marginTop:0,fontSize:12,lineHeight:1.7,color:C.textSub}}
+                      />
+                      <button onClick={saveNotes} disabled={savingNotes} style={{marginTop:10,padding:"8px 20px",borderRadius:8,background:savingNotes?C.surface2:C.accent,border:"none",color:savingNotes?C.textDim:"#fff",fontWeight:700,fontSize:12,cursor:savingNotes?"default":"pointer"}}>
+                        {savingNotes?"Saving…":"💾 Save Notes"}
+                      </button>
+                    </div>
+
+                    <div style={{fontSize:11,color:C.textDim}}>Last generated: {conc.updated_at?new Date(conc.updated_at).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}):"—"}</div>
+                  </>
+                )}
+
+                {/* Notes even without conclusion */}
+                {!conc?.final_verdict&&!loadingC&&(entry||hm)&&(
+                  <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginTop:20}}>
+                    <SectionHeader title="My Personal Notes"/>
+                    <textarea value={myNotes[selected]||""} onChange={e=>setMyNotes(prev=>({...prev,[selected]:e.target.value}))} placeholder="Add your own notes here…" style={{...inp,minHeight:80,marginTop:0,fontSize:12,lineHeight:1.7,color:C.textSub}}/>
+                    <button onClick={saveNotes} disabled={savingNotes} style={{marginTop:10,padding:"8px 20px",borderRadius:8,background:C.accent,border:"none",color:"#fff",fontWeight:700,fontSize:12,cursor:"pointer"}}>{savingNotes?"Saving…":"💾 Save Notes"}</button>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* ── ALERTS TAB ── */}
+            {activeTab==="alerts"&&(
+              <>
+                {/* Live Price Card */}
+                <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
+                  <div style={{background:C.surface,border:`1px solid ${C.accent}`,borderRadius:10,padding:"13px 15px",position:"relative",overflow:"hidden"}}>
+                    <div style={{position:"absolute",top:0,left:0,right:0,height:2,background:C.accent}}/>
+                    <div style={{fontSize:10,color:C.textDim,letterSpacing:1,textTransform:"uppercase",marginBottom:6}}>Live Price</div>
+                    {livePrices[selected]?(
+                      <>
+                        <div style={{fontSize:20,fontWeight:800,color:C.text}}>Rs {parseFloat(livePrices[selected].price).toFixed(2)}</div>
+                        <div style={{fontSize:11,color:livePrices[selected].changePct>=0?C.green:C.red,marginTop:3,fontWeight:700}}>
+                          {livePrices[selected].changePct>=0?"▲":"▼"} {Math.abs(livePrices[selected].changePct||0).toFixed(2)}% today
+                        </div>
+                      </>
+                    ):entry?.latestClose?(
+                      <>
+                        <div style={{fontSize:20,fontWeight:800,color:C.text}}>Rs {entry.latestClose}</div>
+                        <div style={{fontSize:11,color:C.textDim,marginTop:3}}>Last close from analysis</div>
+                      </>
+                    ):<div style={{fontSize:14,fontWeight:700,color:C.textDim}}>Not loaded</div>}
+                  </div>
+                  {livePrices[selected]&&[
+                    ["Day High",`Rs ${parseFloat(livePrices[selected].high||0).toFixed(2)}`],
+                    ["Day Low",`Rs ${parseFloat(livePrices[selected].low||0).toFixed(2)}`],
+                    ["Volume",livePrices[selected].volume?parseInt(livePrices[selected].volume).toLocaleString():"—"],
+                  ].map(([l,v])=>(
+                    <div key={l} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:"13px 15px"}}>
+                      <div style={{fontSize:10,color:C.textDim,letterSpacing:1,textTransform:"uppercase",marginBottom:6}}>{l}</div>
+                      <div style={{fontSize:14,fontWeight:700,color:C.text}}>{v}</div>
+                    </div>
+                  ))}
+                  {!livePrices[selected]&&<div style={{gridColumn:"span 3",background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:"13px 15px",display:"flex",alignItems:"center",gap:10}}>
+                    <div style={{fontSize:12,color:C.textDim}}>Click <b style={{color:C.green}}>💰 Prices</b> button in sidebar to fetch live prices</div>
+                  </div>}
+                </div>
+
+                {/* Refresh button */}
+                <div style={{display:"flex",gap:10,marginBottom:16,alignItems:"center"}}>
+                  <button onClick={()=>refreshPrices([selected])} style={{padding:"8px 20px",borderRadius:8,background:priceLoading?C.surface2:C.green,border:"none",color:priceLoading?C.textDim:"#fff",fontWeight:700,fontSize:12,cursor:"pointer"}}>
+                    {priceLoading?"Fetching…":"💰 Refresh Price"}
+                  </button>
+                  {lastPriceUpdate&&<span style={{fontSize:11,color:C.textDim}}>Last updated: {lastPriceUpdate.toLocaleTimeString("en-PK",{hour:"2-digit",minute:"2-digit"})}</span>}
+                </div>
+
+                {/* Alert Levels from Trading Plan */}
+                <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:14,marginBottom:12}}>
+                  <div style={{fontSize:11,fontWeight:700,color:C.text,letterSpacing:1.3,textTransform:"uppercase",marginBottom:12,paddingBottom:8,borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{color:C.gold}}>⚡ Alert Levels — Auto from Trading Plan</span>
+                    <span style={{fontSize:10,color:C.amber,fontWeight:600}}>Dashboard must be open to trigger</span>
+                  </div>
+                  {(alerts[selected]||[]).length===0?(
+                    <div style={{fontSize:13,color:C.textSub,padding:"20px 0",textAlign:"center"}}>No trading plan found — upload analysis PDF first</div>
+                  ):(alerts[selected]||[]).map((al,i)=>{
+                    const cp=livePrices[selected]?parseFloat(livePrices[selected].price):entry?.latestClose?parseFloat(entry.latestClose):null;
+                    const parts=(al.price||"").toString().replace(/[^0-9.-]/g,"").split("-");
+                    const lo=parseFloat(parts[0]);const hi=parseFloat(parts[1]||parts[0]);
+                    const triggered=cp&&!isNaN(lo)&&cp>=lo&&cp<=(isNaN(hi)?lo*1.02:hi);
+                    const typeColor=al.type==="entry"?C.amber:al.type==="stop"?C.red:C.green;
+                    const typeLabel=al.type==="entry"?"ENTRY":al.type==="stop"?"STOP":"TARGET";
+                    return(
+                      <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 14px",borderRadius:8,marginBottom:8,background:triggered?`${al.color}22`:C.surface2,border:`1.5px solid ${triggered?al.color:typeColor}44`}}>
+                        <div style={{width:10,height:10,borderRadius:"50%",background:triggered?al.color:typeColor,flexShrink:0,boxShadow:triggered?`0 0 10px ${al.color}`:"none"}}/>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                            <span style={{fontSize:9,fontWeight:800,padding:"2px 6px",borderRadius:4,background:`${typeColor}22`,color:typeColor,letterSpacing:0.8}}>{typeLabel}</span>
+                            <span style={{fontSize:13,fontWeight:700,color:triggered?al.color:C.text}}>{al.label}</span>
+                          </div>
+                          <div style={{fontSize:12,color:C.textSub,fontWeight:600}}>Rs {al.price}</div>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          {triggered?(
+                            <div style={{fontSize:13,fontWeight:800,color:al.color}}>⚡ IN ZONE!</div>
+                          ):cp?(
+                            <div>
+                              <div style={{fontSize:12,fontWeight:700,color:C.textSub}}>Rs {Math.abs(cp-lo).toFixed(2)}</div>
+                              <div style={{fontSize:10,color:C.textDim}}>away</div>
+                            </div>
+                          ):<div style={{fontSize:12,color:C.textDim}}>—</div>}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Instructions */}
+                <div style={{background:C.surface2,border:`1px solid ${C.border}`,borderRadius:10,padding:14}}>
+                  <div style={{fontSize:10,fontWeight:700,color:C.textDim,letterSpacing:1.3,textTransform:"uppercase",marginBottom:8}}>How Alerts Work</div>
+                  <div style={{fontSize:11,color:C.textDim,lineHeight:1.8}}>
+                    ⚡ Alert levels are auto-extracted from your trading plan<br/>
+                    💰 Click "Refresh Price" to check current price vs levels<br/>
+                    🔴 When price enters a zone — it highlights and shows notification<br/>
+                    ⚠️ Dashboard must be open in browser for alerts to trigger<br/>
+                    🔄 For 24/7 alerts — use TradingView price alerts instead
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* ── ALL SCRIPTS ACTION PLAN TAB ── */}
+            {activeTab==="actionplan"&&(
+              <>
+                <style>{`
+                  @media print {
+                    body > * { display: none !important; }
+                    #printarea { display: block !important; position: fixed !important; top:0; left:0; width:100%; padding:16px; background:white !important; z-index:9999; }
+                    #printarea * { color: black !important; background: white !important; -webkit-print-color-adjust: exact; }
+                    .print-card { border: 1px solid #999 !important; border-radius:6px !important; padding:10px !important; margin-bottom:10px !important; page-break-inside:avoid; background:white !important; }
+                    .print-card table { width:100%; border-collapse:collapse; }
+                    .print-card td, .print-card th { border:1px solid #ccc; padding:3px 6px; font-size:10px; color:black !important; }
+                    .print-badge { border:1px solid #999 !important; padding:2px 6px; border-radius:4px; font-size:10px; font-weight:700; }
+                    .no-print { display:none !important; }
+                    .print-title { display:block !important; font-size:16px; font-weight:800; margin-bottom:4px; }
+                    .print-date { display:block !important; font-size:11px; color:#666; margin-bottom:12px; }
+                  }
+                  @media screen { .print-title, .print-date { display:none; } }
+                `}</style>
+
+                <div className="no-print" style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+                  <div style={{fontSize:14,fontWeight:700,color:C.text}}>🖨️ All Scripts — Action Plan</div>
+                  <button onClick={()=>window.print()} style={{padding:"9px 22px",borderRadius:8,background:C.accent,border:"none",color:"#fff",fontWeight:700,fontSize:13,cursor:"pointer"}}>🖨️ Print / Save as PDF</button>
+                </div>
+
+                <div id="printarea">
+                  <div className="print-title">PSX Trading — Action Plan Summary</div>
+                  <div className="print-date">Generated: {new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"long",year:"numeric"})}</div>
+
+                  {scriptList.map(sym=>{
+                    const ents=scripts[sym]||[];
+                    const e=ents[0];if(!e) return null;
+                    const sv=vStyle(e.verdict||"");
+                    const tp=parseJ(e.trading_plan);
+                    const hmD=hmData[sym];
+                    const hmC=hmSigStyle(hmD?.consensus||"");
+                    const concD=conclusions[sym];
+                    const concV=vStyle(concD?.final_verdict||"");
+                    const lp=livePrices[sym];
+                    const price=lp?.price?`Rs ${parseFloat(lp.price).toFixed(2)}`:e.latest_close?`Rs ${e.latest_close}`:"—";
+                    return(
+                      <div key={sym} className="print-card" style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:18,marginBottom:14}}>
+                        {/* Header */}
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,paddingBottom:8,borderBottom:`1px solid ${C.border}`}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                            <span style={{fontSize:18,fontWeight:800,color:C.text}}>{sym}</span>
+                            <span className="print-badge" style={{fontSize:11,padding:"3px 10px",borderRadius:20,background:sv.bg,color:sv.color,fontWeight:700}}>{sv.label}</span>
+                            {hmD?.consensus&&<span className="print-badge" style={{fontSize:11,padding:"3px 10px",borderRadius:20,background:hmC.bg,color:hmC.color,fontWeight:700}}>HM: {hmD.consensus}</span>}
+                            {concD?.final_verdict&&<span className="print-badge" style={{fontSize:11,padding:"3px 10px",borderRadius:20,background:concV.bg,color:concV.color,fontWeight:700}}>🎯 {concD.final_verdict}</span>}
+                          </div>
+                          <div style={{textAlign:"right"}}>
+                            <div style={{fontSize:16,fontWeight:800,color:C.accent}}>{price}</div>
+                            <div style={{fontSize:10,color:C.textDim}}>{e.date}</div>
+                          </div>
+                        </div>
+
+                        {/* Verdict */}
+                        {e.verdict&&<div style={{fontSize:12,color:C.textSub,lineHeight:1.6,marginBottom:10,padding:"7px 10px",background:C.surface2,borderRadius:6,borderLeft:`3px solid ${sv.color}`}}>{e.verdict}</div>}
+
+                        {/* Action Plan */}
+                        {concD?.action_plan&&(
+                          <div style={{marginBottom:10,padding:"8px 12px",background:`${concV.color}11`,borderRadius:6,border:`1px solid ${concV.color}33`}}>
+                            <div style={{fontSize:9,fontWeight:800,color:C.gold,letterSpacing:1,textTransform:"uppercase",marginBottom:4}}>⚡ Action Plan</div>
+                            <div style={{fontSize:12,fontWeight:600,color:concV.color,lineHeight:1.6}}>{concD.action_plan}</div>
+                          </div>
+                        )}
+
+                        {/* Trading Plan Table */}
+                        {tp.length>0&&(
+                          <div style={{marginBottom:10}}>
+                            <div style={{fontSize:9,fontWeight:700,color:C.textDim,letterSpacing:1,textTransform:"uppercase",marginBottom:6}}>Trading Plan</div>
+                            <div style={{overflowX:"auto"}}>
+                              <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                                <thead>
+                                  <tr style={{borderBottom:`1px solid ${C.border}`,background:C.surface2}}>
+                                    {["Scenario","Entry","Stop Loss","T1","T2","View"].map(h=><th key={h} style={{textAlign:"left",padding:"4px 8px",color:C.textDim,fontWeight:700,fontSize:10,textTransform:"uppercase"}}>{h}</th>)}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {tp.map((r,i)=>(
+                                    <tr key={i} style={{borderBottom:`1px solid ${C.border}`,background:i%2===0?"transparent":C.surface2}}>
+                                      <td style={{padding:"5px 8px",fontWeight:700,color:C.text,fontSize:11}}>{r.scenario}</td>
+                                      <td style={{padding:"5px 8px",color:C.amber,fontWeight:600,fontSize:11}}>{r.entry}</td>
+                                      <td style={{padding:"5px 8px",color:C.red,fontWeight:600,fontSize:11}}>{r.stopLoss}</td>
+                                      <td style={{padding:"5px 8px",color:C.green,fontWeight:600,fontSize:11}}>{r.target1}</td>
+                                      <td style={{padding:"5px 8px",color:C.green,fontWeight:600,fontSize:11}}>{r.target2||"—"}</td>
+                                      <td style={{padding:"5px 8px",color:C.textDim,fontSize:10}}>{r.view}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Bottom row */}
+                        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6}}>
+                          {[
+                            ["Stop Loss",concD?.stop_loss?`Rs ${concD.stop_loss}`:"—",C.red],
+                            ["Target",concD?.target_price?`Rs ${concD.target_price}`:"—",C.green],
+                            ["Time Horizon",concD?.time_horizon||"—",C.gold],
+                            ["Top Risk",concD?.top_risk||"—",C.amber],
+                          ].map(([l,v,c])=>(
+                            <div key={l} style={{background:C.surface2,borderRadius:6,padding:"7px 9px"}}>
+                              <div style={{fontSize:9,color:C.textDim,marginBottom:2,textTransform:"uppercase",letterSpacing:0.7}}>{l}</div>
+                              <div style={{fontSize:11,fontWeight:600,color:c,lineHeight:1.4}}>{v}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Notes */}
+                        {myNotes[sym]&&(
+                          <div style={{marginTop:8,padding:"7px 10px",background:C.surface2,borderRadius:6,borderLeft:`3px solid ${C.purple}`}}>
+                            <div style={{fontSize:9,color:C.textDim,marginBottom:2,textTransform:"uppercase",letterSpacing:0.7}}>My Notes</div>
+                            <div style={{fontSize:11,color:C.textSub,lineHeight:1.5}}>{myNotes[sym]}</div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* PDF Panel */}
+      {pdfOpen&&entry?.b64&&(
+        <div style={{width:480,minWidth:360,background:C.surface,borderLeft:`1px solid ${C.border}`,display:"flex",flexDirection:"column",flexShrink:0}}>
+          <div style={{padding:"13px 16px",borderBottom:`1px solid ${C.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div><div style={{fontSize:13,fontWeight:700}}>{entry.fileName}</div><div style={{fontSize:10,color:C.textDim,marginTop:2}}>{entry.date}</div></div>
+            <div style={{display:"flex",gap:8}}>
+              <a href={entry.b64} download={entry.fileName} style={{fontSize:11,color:C.accent,background:C.accentDim,padding:"5px 12px",borderRadius:6,textDecoration:"none",fontWeight:600}}>⬇ Download</a>
+              <button onClick={()=>setPdfOpen(false)} style={{background:"transparent",border:"none",color:C.textDim,cursor:"pointer",fontSize:14}}>✕</button>
+            </div>
+          </div>
+          <iframe src={entry.b64} style={{flex:1,border:"none",width:"100%"}} title="PDF"/>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      {showSettings&&(
+        <div onClick={e=>{if(e.target===e.currentTarget)setShowSettings(false);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300}}>
+          <div style={{background:C.surface,border:`1px solid ${C.border2}`,borderRadius:14,padding:28,width:440,boxShadow:"0 32px 80px rgba(0,0,0,0.7)"}}>
+            <div style={{fontSize:16,fontWeight:700,marginBottom:4}}>⚙ Settings — Claude API Key</div>
+            <div style={{fontSize:12,color:C.textDim,marginBottom:20,lineHeight:1.6}}>Get your key from <b style={{color:C.accent}}>console.anthropic.com</b> → API Keys → Create Key.</div>
+            <label style={{fontSize:12,color:C.textDim}}>Claude API Key</label>
+            <input style={inp} placeholder="sk-ant-..." value={apiKey} onChange={e=>setApiKey(e.target.value)} type="password"/>
+            <div style={{fontSize:11,color:C.textDim,marginTop:8,marginBottom:20}}>✓ Saved locally in your browser only.</div>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setShowSettings(false)} style={{flex:1,padding:"9px 0",borderRadius:8,border:`1px solid ${C.border2}`,background:"transparent",color:C.textDim,fontSize:13,cursor:"pointer"}}>Cancel</button>
+              <button onClick={saveApiKey} style={{flex:1,padding:"9px 0",borderRadius:8,background:C.accent,border:"none",color:"#fff",fontSize:13,fontWeight:700,cursor:"pointer"}}>Save Key</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Upload Analysis Modal */}
+      {addingAnalysis&&(
+        <div onClick={e=>{if(e.target===e.currentTarget){setAddingAnalysis(false);setManualName("");}}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300}}>
+          <div style={{background:C.surface,border:`1px solid ${C.border2}`,borderRadius:14,padding:28,width:420,boxShadow:"0 32px 80px rgba(0,0,0,0.7)"}}>
+            <div style={{fontSize:16,fontWeight:700,marginBottom:4}}>📊 Upload Analysis PDF</div>
+            <div style={{fontSize:12,color:C.textDim,marginBottom:16}}>Claude extracts fundamentals, technicals, trading plan. If HM data also exists, conclusion auto-generates.</div>
+            <div style={{marginBottom:14}}><label style={{fontSize:12,color:C.textDim}}>Script name <span style={{opacity:0.6}}>(optional — auto-detected)</span></label><input style={inp} placeholder="e.g. OGDC" value={manualName} onChange={e=>setManualName(e.target.value.toUpperCase())}/></div>
+            <UploadZone loading={loadingA} dragOver={dragOverA} setDragOver={setDragOverA} onFiles={handleAnalysisFiles} fileRef={fileRefA} label="Drop Analysis PDF here" hint="or click to browse"/>
+            <button onClick={()=>{setAddingAnalysis(false);setManualName("");}} style={{width:"100%",marginTop:12,padding:"9px 0",borderRadius:8,border:`1px solid ${C.border2}`,background:"transparent",color:C.textDim,fontSize:13,cursor:"pointer"}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* Upload HM Modal */}
+      {addingHM&&(
+        <div onClick={e=>{if(e.target===e.currentTarget)setAddingHM(false);}} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.75)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:300}}>
+          <div style={{background:C.surface,border:`1px solid ${C.pinkDim}`,borderRadius:14,padding:28,width:420,boxShadow:"0 32px 80px rgba(0,0,0,0.7)"}}>
+            <div style={{fontSize:16,fontWeight:700,marginBottom:4}}>📈 Upload HM Indicator PDF</div>
+            <div style={{fontSize:12,color:C.textDim,marginBottom:6}}>Uploading for: <b style={{color:C.pink}}>{selected}</b></div>
+            <div style={{fontSize:11,color:C.textDim,marginBottom:16,background:C.amberDim,border:`1px solid ${C.amber}`,borderRadius:7,padding:"7px 10px"}}>⚠ Replaces existing HM data. Conclusion will auto-regenerate.</div>
+            <UploadZone loading={loadingH} dragOver={dragOverH} setDragOver={setDragOverH} onFiles={handleHMFiles} fileRef={fileRefH} label="Drop HM PDF here" hint="All 4 timeframes extracted automatically"/>
+            <button onClick={()=>setAddingHM(false)} style={{width:"100%",marginTop:12,padding:"9px 0",borderRadius:8,border:`1px solid ${C.border2}`,background:"transparent",color:C.textDim,fontSize:13,cursor:"pointer"}}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
