@@ -99,15 +99,15 @@ async function sbReq(path,opts={}){
   const t=await res.text();return t?JSON.parse(t):null;
 }
 async function loadAll(){
-  const rows=await sbReq(`scripts?order=uploaded_at.desc&select=id,symbol,file_name,uploaded_at,date,verdict,fundamental_view,main_positives,main_risks,latest_close,high_20d,low_20d,dma20,dma50,dma100,rsi,atr,tech_view,key_levels,trading_plan,fair_value,can_double&limit=50`)||[];
+  const rows=await sbReq(`scripts?select=id,symbol,file_name,uploaded_at,date,verdict,fundamental_view,main_positives,main_risks,latest_close,high_20d,low_20d,dma20,dma50,dma100,rsi,atr,tech_view,key_levels,trading_plan,fair_value,can_double&limit=30`)||[];
   const g={};for(const r of rows){const s=r.symbol||"?";if(!g[s])g[s]=[];g[s].push(r);}return g;
 }
 async function loadAllHM(){
-  const rows=await sbReq(`hm_scripts?order=uploaded_at.desc&select=id,symbol,file_name,uploaded_at,date,consensus,conviction,aligned,summary,distance_assessment,monthly,biweekly,weekly,daily,entry_zone,stop_loss,trailing_stop,risk_flag&limit=50`)||[];
+  const rows=await sbReq(`hm_scripts?select=id,symbol,file_name,uploaded_at,date,consensus,conviction,aligned,summary,distance_assessment,monthly,biweekly,weekly,daily,entry_zone,stop_loss,trailing_stop,risk_flag&limit=30`)||[];
   const g={};for(const r of rows){if(!g[r.symbol])g[r.symbol]=r;}return g;
 }
 async function loadAllConclusions(){
-  const rows=await sbReq(`conclusions?order=updated_at.desc&select=*&limit=50`)||[];
+  const rows=await sbReq(`conclusions?select=id,symbol,updated_at,final_verdict,confidence,overall_summary,fundamental_score,technical_score,hm_score,alignment_note,action_plan,entry_strategy,exit_strategy,stop_loss,target_price,time_horizon,top_risk,watch_list,my_notes&limit=30`)||[];
   const g={};for(const r of rows){g[r.symbol]=r;}return g;
 }
 async function saveRow(table,entry){
