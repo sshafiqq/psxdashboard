@@ -103,11 +103,11 @@ async function loadAll(){
   const g={};for(const r of rows){const s=r.symbol||"?";if(!g[s])g[s]=[];g[s].push(r);}return g;
 }
 async function loadAllHM(){
-  const rows=await sbReq(`hm_scripts?select=id,symbol,file_name,uploaded_at,date,consensus,conviction,aligned,summary,distance_assessment,monthly,biweekly,weekly,daily,entry_zone,stop_loss,trailing_stop,risk_flag&limit=30`)||[];
+  const rows=await sbReq(`hm_scripts?select=id,symbol,file_name,uploaded_at,date,consensus,conviction,aligned,summary,distance_assessment,monthly,biweekly,weekly,daily,entry_zone,stop_loss,trailing_stop&limit=30`)||[];
   const g={};for(const r of rows){if(!g[r.symbol])g[r.symbol]=r;}return g;
 }
 async function loadAllConclusions(){
-  const rows=await sbReq(`conclusions?select=id,symbol,updated_at,final_verdict,confidence,overall_summary,fundamental_score,technical_score,hm_score,alignment_note,action_plan,entry_strategy,exit_strategy,stop_loss,target_price,time_horizon,top_risk,watch_list,my_notes&limit=30`)||[];
+  const rows=await sbReq(`conclusions?select=symbol,updated_at,final_verdict,confidence,overall_summary,fundamental_score,technical_score,hm_score,alignment_note,action_plan,entry_strategy,exit_strategy,stop_loss,target_price,time_horizon,top_risk,watch_list,my_notes&limit=30`)||[];
   const g={};for(const r of rows){g[r.symbol]=r;}return g;
 }
 async function saveRow(table,entry){
@@ -526,7 +526,7 @@ function App(){
     let info={};
     try{info=await extractHM(b64,localStorage.getItem("psx-claude-key"));}
     catch(e){showToast("HM extraction failed: "+e.message,true);setLoadingH("");return;}
-    const row={symbol:selected,file_name:file.name,uploaded_at:new Date().toISOString(),b64,date:info.date||"",consensus:info.consensus||"",conviction:info.conviction||"",aligned:info.aligned||"",summary:info.summary||"",distance_assessment:info.distanceAssessment||"",monthly:JSON.stringify(info.monthly||{}),biweekly:JSON.stringify(info.biweekly||{}),weekly:JSON.stringify(info.weekly||{}),daily:JSON.stringify(info.daily||{}),entry_zone:info.entryZone||"",stop_loss:info.stopLoss||"",trailing_stop:info.trailingStop||"",risk_flag:info.riskFlag||""};
+    const row={symbol:selected,file_name:file.name,uploaded_at:new Date().toISOString(),b64,date:info.date||"",consensus:info.consensus||"",conviction:info.conviction||"",aligned:info.aligned||"",summary:info.summary||"",distance_assessment:info.distanceAssessment||"",monthly:JSON.stringify(info.monthly||{}),biweekly:JSON.stringify(info.biweekly||{}),weekly:JSON.stringify(info.weekly||{}),daily:JSON.stringify(info.daily||{}),entry_zone:info.entryZone||"",stop_loss:info.stopLoss||"",trailing_stop:info.trailingStop||""};
     try{
       setLoadingH(`Saving HM data…`);
       const saved=await upsertBySymbol("hm_scripts",row);
@@ -557,7 +557,7 @@ function App(){
     try{
       for(const e of scripts[name]||[]) await delRow("scripts",e.id);
       if(hmData[name]) await delRow("hm_scripts",hmData[name].id);
-      if(conclusions[name]) await delRow("conclusions",conclusions[name].id);
+      if(conclusions[name]) await sbReq(`conclusions?symbol=eq.${encodeURIComponent(name)}`,{method:"DELETE"});
       const u={...scripts};delete u[name];setScripts(u);
       const hmu={...hmData};delete hmu[name];setHmData(hmu);
       const cu={...conclusions};delete cu[name];setConclusions(cu);
