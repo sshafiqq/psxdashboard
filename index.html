@@ -103,11 +103,11 @@ async function loadAll(){
   const g={};for(const r of rows){const s=r.symbol||"?";if(!g[s])g[s]=[];g[s].push(r);}return g;
 }
 async function loadAllHM(){
-  const rows=await sbReq(`hm_scripts?select=id,symbol,file_name,uploaded_at,date,consensus,conviction,aligned,summary,distance_assessment,monthly,biweekly,weekly,daily,entry_zone,stop_loss,trailing_stop&limit=30`)||[];
+  const rows=await sbReq(`hm_scripts?select=symbol,file_name,uploaded_at,date,consensus,conviction,aligned,summary,distance_assessment,monthly,biweekly,weekly,daily,entry_zone,stop_loss,trailing_stop&limit=30`)||[];
   const g={};for(const r of rows){if(!g[r.symbol])g[r.symbol]=r;}return g;
 }
 async function loadAllConclusions(){
-  const rows=await sbReq(`conclusions?select=symbol,updated_at,final_verdict,confidence,overall_summary,fundamental_score,technical_score,hm_score,alignment_note,action_plan,entry_strategy,exit_strategy,stop_loss,target_price,time_horizon,top_risk,watch_list,my_notes&limit=30`)||[];
+  const rows=await sbReq(`conclusions?select=*&limit=30`)||[];
   const g={};for(const r of rows){g[r.symbol]=r;}return g;
 }
 async function saveRow(table,entry){
@@ -359,19 +359,35 @@ function App(){
   const loadFromDB=async()=>{
     setDbLoading(true);setDbStatus("connecting");
     try{
-      const [g,hm,conc]=await Promise.all([loadAll(),loadAllHM(),loadAllConclusions()]);
+      const g=await loadAll();
+      let hm={};
+      let conc={};
+
+      try{hm=await loadAllHM();}
+      catch(e){console.warn("HM cloud load failed:",e);}
+
+      try{conc=await loadAllConclusions();}
+      catch(e){console.warn("Conclusions cloud load failed:",e);}
+
       setScripts(g);setHmData(hm);setConclusions(conc);
-      // restore notes from conclusions
-      const notes={};for(const [sym,c] of Object.entries(conc)){notes[sym]=c.my_notes||"";}
+
+      const notes={};
+      for(const [sym,c] of Object.entries(conc)){notes[sym]=c.my_notes||"";}
       setMyNotes(notes);
-      const k=Object.keys(g)[0];if(k){setSelected(k);setSelDate(g[k][0]?.date);}
+
+      const k=Object.keys(g)[0];
+      if(k){setSelected(k);setSelDate(g[k][0]?.date);}
+
       setDbStatus("ok");
-      // Fetch live prices for all symbols
+
       const syms=Object.keys(g);
       if(syms.length>0) refreshPrices(syms,g);
-      // Build alerts from trading plans
       buildAlerts(g);
-    }catch(e){setDbStatus("error");showToast("Cloud connection failed",true);console.error(e);}
+    }catch(e){
+      setDbStatus("error");
+      showToast("Cloud connection failed: "+e.message,true);
+      console.error(e);
+    }
     setDbLoading(false);
   };
 
@@ -556,7 +572,7 @@ function App(){
     if(!window.confirm(`Delete all data for ${name}?`)) return;
     try{
       for(const e of scripts[name]||[]) await delRow("scripts",e.id);
-      if(hmData[name]) await delRow("hm_scripts",hmData[name].id);
+      if(hmData[name]) await sbReq(`hm_scripts?symbol=eq.${encodeURIComponent(name)}`,{method:"DELETE"});
       if(conclusions[name]) await sbReq(`conclusions?symbol=eq.${encodeURIComponent(name)}`,{method:"DELETE"});
       const u={...scripts};delete u[name];setScripts(u);
       const hmu={...hmData};delete hmu[name];setHmData(hmu);
